@@ -206,7 +206,7 @@ async function syncAndApplyHyprlandConfig(isStartup = false) {
       const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'))
       if (settings.cursor_theme && settings.cursor_size) {
         console.log(`Restoring cursor theme: ${settings.cursor_theme} (${settings.cursor_size})`)
-        await execAsync(`hyprctl setcursor ${settings.cursor_theme} ${settings.cursor_size}`)
+        await applyGlobalCursor(settings.cursor_theme, settings.cursor_size)
       }
     }
   } catch (e) {
@@ -1137,7 +1137,131 @@ ipcMain.handle('get_cursor_settings', async () => {
   return { theme: defaultTheme, size: defaultSize };
 });
 
-ipcMain.handle('apply_cursor_settings', async (_, { theme, size }: { theme: string, size: number }) => {
+function updateGtkSettingsFile(filePath: string, theme: string, size: number) {
+  try {
+    let content = '';
+    if (fs.existsSync(filePath)) {
+      content = fs.readFileSync(filePath, 'utf-8');
+    }
+    const lines = content.split('\n');
+    let inSettingsSection = false;
+    let themeSet = false;
+    let sizeSet = false;
+    const newLines: string[] = [];
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+        if (inSettingsSection) {
+          if (!themeSet) {
+            newLines.push(`gtk-cursor-theme-name=${theme}`);
+            themeSet = true;
+          }
+          if (!sizeSet) {
+            newLines.push(`gtk-cursor-theme-size=${size}`);
+            sizeSet = true;
+          }
+        }
+        inSettingsSection = trimmed.toLowerCase() === '[settings]';
+      } else if (inSettingsSection) {
+        if (trimmed.startsWith('gtk-cursor-theme-name=') || trimmed.startsWith('gtk-cursor-theme-name =')) {
+          newLines.push(`gtk-cursor-theme-name=${theme}`);
+          themeSet = true;
+          continue;
+        }
+        if (trimmed.startsWith('gtk-cursor-theme-size=') || trimmed.startsWith('gtk-cursor-theme-size =')) {
+          newLines.push(`gtk-cursor-theme-size=${size}`);
+          sizeSet = true;
+          continue;
+        }
+      }
+      newLines.push(line);
+    }
+
+    if (inSettingsSection) {
+      if (!themeSet) {
+        newLines.push(`gtk-cursor-theme-name=${theme}`);
+        themeSet = true;
+      }
+      if (!sizeSet) {
+        newLines.push(`gtk-cursor-theme-size=${size}`);
+        sizeSet = true;
+      }
+    }
+
+    if (!themeSet || !sizeSet) {
+      if (newLines.length > 0 && newLines[newLines.length - 1].trim() !== '') {
+        newLines.push('');
+      }
+      newLines.push('[Settings]');
+      if (!themeSet) newLines.push(`gtk-cursor-theme-name=${theme}`);
+      if (!sizeSet) newLines.push(`gtk-cursor-theme-size=${size}`);
+    }
+
+    const dir = path.dirname(filePath);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(filePath, newLines.join('\n'));
+  } catch (err) {
+    console.error(`Failed to update ${filePath}:`, err);
+  }
+}
+
+function updateXsettingsdConfig(theme: string, size: number) {
+  try {
+    const configPath = path.join(os.homedir(), '.config/xsettingsd/xsettingsd.conf');
+    let content = '';
+    if (fs.existsSync(configPath)) {
+      content = fs.readFileSync(configPath, 'utf-8');
+    }
+    const lines = content.split('\n');
+    let themeSet = false;
+    let sizeSet = false;
+    const newLines: string[] = [];
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith('Gtk/CursorThemeName')) {
+        newLines.push(`Gtk/CursorThemeName "${theme}"`);
+        themeSet = true;
+        continue;
+      }
+      if (trimmed.startsWith('Gtk/CursorThemeSize')) {
+        newLines.push(`Gtk/CursorThemeSize ${size}`);
+        sizeSet = true;
+        continue;
+      }
+      newLines.push(line);
+    }
+
+    if (!themeSet) {
+      newLines.push(`Gtk/CursorThemeName "${theme}"`);
+    }
+    if (!sizeSet) {
+      newLines.push(`Gtk/CursorThemeSize ${size}`);
+    }
+
+    const dir = path.dirname(configPath);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(configPath, newLines.join('\n'));
+
+    execAsync('killall -HUP xsettingsd').catch(() => {});
+  } catch (err) {
+    console.error('Failed to update xsettingsd.conf:', err);
+  }
+}
+
+function updateDefaultIconTheme(theme: string) {
+  try {
+    const dir = path.join(os.homedir(), '.icons/default');
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const filePath = path.join(dir, 'index.theme');
+    fs.writeFileSync(filePath, `[Icon Theme]\nInherits=${theme}\n`);
+  } catch (err) {
+    console.error('Failed to update ~/.icons/default/index.theme:', err);
+  }
+}
+
+async function applyGlobalCursor(theme: string, size: number) {
   // A. Apply dynamically in active Hyprland session
   try {
     await execAsync(`hyprctl setcursor ${theme} ${size}`);
@@ -1145,13 +1269,39 @@ ipcMain.handle('apply_cursor_settings', async (_, { theme, size }: { theme: stri
     console.error("Failed to run hyprctl setcursor:", e);
   }
 
-  // B. Apply for GTK applications
+  // B. Apply for GTK applications via gsettings
   try {
     await execAsync(`gsettings set org.gnome.desktop.interface cursor-theme '${theme}'`);
     await execAsync(`gsettings set org.gnome.desktop.interface cursor-size ${size}`);
   } catch (e) {
     console.error("Failed to run gsettings:", e);
   }
+
+  // C. Update GTK 3 & GTK 4 config files directly
+  updateGtkSettingsFile(path.join(os.homedir(), '.config/gtk-3.0/settings.ini'), theme, size);
+  updateGtkSettingsFile(path.join(os.homedir(), '.config/gtk-4.0/settings.ini'), theme, size);
+
+  // D. Update xsettingsd config
+  updateXsettingsdConfig(theme, size);
+
+  // E. Update X11 default icon theme fallback
+  updateDefaultIconTheme(theme);
+
+  // F. Dynamic Xresources update for XWayland
+  try {
+    await execAsync(`echo -e "Xcursor.theme: ${theme}\\nXcursor.size: ${size}" | xrdb -merge`);
+  } catch (e) {
+    // xrdb might not be available
+  }
+
+  // G. Import to session environment
+  try {
+    await execAsync(`systemctl --user import-environment XCURSOR_THEME XCURSOR_SIZE`);
+  } catch (e) {}
+}
+
+ipcMain.handle('apply_cursor_settings', async (_, { theme, size }: { theme: string, size: number }) => {
+  await applyGlobalCursor(theme, size);
 
   // C. Save to app settings
   const settingsPath = path.join(os.homedir(), '.config/nwg-react-displays/settings.json');
