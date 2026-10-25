@@ -1,6 +1,6 @@
 # 🖥️ HyprDisplay Manager
 
-![Version](https://img.shields.io/badge/version-0.1.15-blue)
+![Version](https://img.shields.io/badge/version-0.1.16-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Platform](https://img.shields.io/badge/platform-Linux-orange)
 
@@ -27,6 +27,7 @@
 *   **Profile Persistence:** Save multiple configuration profiles and switch between them instantly.
 
 ### ⚙️ Advanced Settings
+*   **Laptop Trackpad Control:** Instantly toggle the internal laptop trackpad on/off via top toolbar button, settings panel, or system tray menu with persistent configuration across reboots and Hyprland reloads.
 *   **Virtual & Android Monitors:** Seamlessly spawn virtual displays and stream them over VNC to mobile devices, with real-time connection status synchronization.
 *   **Self-Healing Control Sockets:** Automated stale VNC control socket cleaning and unique socket bindings to prevent server crashes and multiple instance conflicts.
 *   **System Integration:** Optional "Launch on Startup" and "Run in Background" (System Tray) support.

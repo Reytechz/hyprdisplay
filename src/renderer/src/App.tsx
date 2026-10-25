@@ -10,7 +10,7 @@ const getCurrentWindow = () => ({
 });
 import { motion, AnimatePresence } from "framer-motion";
 import { 
-  RefreshCcw, Save, Plus, Minus, ZoomIn, ZoomOut, Layers, X, Square, Check, Layout, ChevronDown, Monitor as ScreenIcon, Trash2, Settings, Power, Download, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Grid, Monitor, PanelLeft, PanelRight, PanelTop, PanelBottom, Tv, Smartphone, Eye, EyeOff, Copy
+  RefreshCcw, Save, Plus, Minus, ZoomIn, ZoomOut, Layers, X, Square, Check, Layout, ChevronDown, Monitor as ScreenIcon, Trash2, Settings, Power, Download, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Grid, Monitor, PanelLeft, PanelRight, PanelTop, PanelBottom, Tv, Smartphone, Eye, EyeOff, Copy, Touchpad, TouchpadOff
 } from "lucide-react";
 const getVersion = async () => invoke<string>('get_app_version');
 import "./App.css";
@@ -401,6 +401,39 @@ function Dashboard() {
   const [selectedSize, setSelectedSize] = useState(24);
   const [cursorPreview, setCursorPreview] = useState<string | null>(null);
 
+  // Touchpad state
+  const [touchpadStatus, setTouchpadStatus] = useState<{
+    devices: string[];
+    currentDevice: string | null;
+    enabled: boolean;
+  }>({ devices: [], currentDevice: null, enabled: true });
+
+  const fetchTouchpadStatus = async () => {
+    try {
+      const status = await invoke<{ devices: string[]; currentDevice: string | null; enabled: boolean }>('get_touchpad_status');
+      if (status) {
+        setTouchpadStatus(status);
+      }
+    } catch (e) {
+      console.error("Failed to fetch touchpad status:", e);
+    }
+  };
+
+  const toggleTouchpad = async (newState?: boolean) => {
+    const targetState = typeof newState === 'boolean' ? newState : !touchpadStatus.enabled;
+    try {
+      setTouchpadStatus(prev => ({ ...prev, enabled: targetState }));
+      await invoke('set_touchpad_enabled', {
+        deviceName: touchpadStatus.currentDevice,
+        enabled: targetState
+      });
+      showToast(`Laptop trackpad ${targetState ? 'enabled' : 'disabled'}`, targetState ? 'success' : 'info');
+    } catch (err: any) {
+      showToast(`Failed to toggle trackpad: ${err.message || err}`, 'error');
+      fetchTouchpadStatus();
+    }
+  };
+
   useEffect(() => {
     if (showSettings) {
       invoke<string[]>('get_cursor_themes').then(themes => {
@@ -466,8 +499,9 @@ function Dashboard() {
           setAutoApply(autoApplyVal);
         } catch (e) {}
 
-        // 4. Fetch VNC status
+        // 4. Fetch VNC status and touchpad status
         await fetchVncStatus();
+        await fetchTouchpadStatus();
 
         // 5. Load last profile
         const last = await invoke<string>("get_last_profile");
@@ -496,8 +530,21 @@ function Dashboard() {
       }
     });
 
+    const unsubTouchpad = api.on('touchpad_status_changed', (data: any) => {
+      console.log('Touchpad status changed event:', data);
+      if (data && typeof data.enabled === 'boolean') {
+        setTouchpadStatus(prev => ({
+          ...prev,
+          enabled: data.enabled,
+          devices: data.devices || prev.devices,
+          currentDevice: data.currentDevice || prev.currentDevice
+        }));
+      }
+    });
+
     return () => {
       unsubVnc();
+      if (unsubTouchpad) unsubTouchpad();
     };
   }, []);
 
@@ -1244,6 +1291,19 @@ function Dashboard() {
           </button>
           <button className="control-btn" onClick={() => { setShowVirtualModal(true); fetchVncStatus(); }} title="Manage Virtual / Android Monitors">
             <Tv size={18} color={showVirtualModal ? 'var(--accent)' : 'currentColor'} />
+          </button>
+          <button 
+            className="control-btn" 
+            onClick={() => toggleTouchpad()} 
+            title={touchpadStatus.enabled 
+              ? `Laptop Trackpad: Enabled (${touchpadStatus.currentDevice || 'Touchpad'})\nClick to Disable` 
+              : `Laptop Trackpad: Disabled (${touchpadStatus.currentDevice || 'Touchpad'})\nClick to Enable`
+            }
+            style={{
+              color: touchpadStatus.enabled ? 'var(--accent)' : '#ef4444'
+            }}
+          >
+            {touchpadStatus.enabled ? <Touchpad size={18} /> : <TouchpadOff size={18} />}
           </button>
           <button className="control-btn" onClick={() => setShowPresetMenu(!showPresetMenu)}>
             <Layout size={18} color={showPresetMenu ? 'var(--accent)' : 'currentColor'} />
@@ -2142,6 +2202,53 @@ function Dashboard() {
                   >
                     <motion.div 
                       animate={{ x: autoApply ? 20 : 2 }}
+                      style={{ width: '18px', height: '18px', borderRadius: '50%', background: 'white', position: 'absolute', top: 2, left: 0 }}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Laptop Trackpad Option */}
+              <div className="settings-group" style={{ marginBottom: '24px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                    <div style={{ 
+                      width: '32px', height: '32px', borderRadius: '10px', 
+                      background: touchpadStatus.enabled ? 'rgba(99, 102, 241, 0.15)' : 'rgba(239, 68, 68, 0.15)', 
+                      color: touchpadStatus.enabled ? 'var(--accent)' : '#ef4444', 
+                      display: 'flex', alignItems: 'center', justifyContent: 'center' 
+                    }}>
+                      {touchpadStatus.enabled ? <Touchpad size={16} /> : <TouchpadOff size={16} />}
+                    </div>
+                    <div>
+                      <div style={{ fontSize: '14px', color: 'white', marginBottom: '2px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        Laptop Trackpad
+                        <span style={{ 
+                          fontSize: '10px', 
+                          padding: '2px 6px', 
+                          borderRadius: '4px', 
+                          fontWeight: '600',
+                          background: touchpadStatus.enabled ? 'rgba(34, 197, 94, 0.15)' : 'rgba(239, 68, 68, 0.15)',
+                          color: touchpadStatus.enabled ? '#4ade80' : '#f87171' 
+                        }}>
+                          {touchpadStatus.enabled ? 'Enabled' : 'Disabled'}
+                        </span>
+                      </div>
+                      <div style={{ fontSize: '11px', color: 'var(--text-dim)', maxWidth: '220px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {touchpadStatus.currentDevice ? touchpadStatus.currentDevice : 'Enable or disable internal laptop trackpad'}
+                      </div>
+                    </div>
+                  </div>
+                  <div 
+                    onClick={() => toggleTouchpad()}
+                    style={{ 
+                      width: '40px', height: '22px', borderRadius: '20px', 
+                      background: touchpadStatus.enabled ? 'var(--accent)' : 'rgba(255,255,255,0.1)', 
+                      position: 'relative', cursor: 'pointer', transition: 'all 0.3s'
+                    }}
+                  >
+                    <motion.div 
+                      animate={{ x: touchpadStatus.enabled ? 20 : 2 }}
                       style={{ width: '18px', height: '18px', borderRadius: '50%', background: 'white', position: 'absolute', top: 2, left: 0 }}
                     />
                   </div>

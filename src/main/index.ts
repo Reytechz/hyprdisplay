@@ -14,6 +14,8 @@ const execAsync = promisify(exec)
 
 let tray: Tray | null = null
 let mainWindow: BrowserWindow | null = null
+let isTouchpadEnabled = true
+let currentTouchpadDevice: string | null = null
 
 if (process.platform === 'linux') {
   app.commandLine.appendSwitch('class', 'hyprdisplay')
@@ -92,12 +94,77 @@ function createWindow(): void {
   })
 }
 
+function updateTrayMenu(touchpadEnabled?: boolean, deviceName?: string | null): void {
+  if (typeof touchpadEnabled === 'boolean') {
+    isTouchpadEnabled = touchpadEnabled
+  }
+  if (deviceName !== undefined) {
+    currentTouchpadDevice = deviceName
+  }
+  if (!tray) return
+
+  const contextMenu = Menu.buildFromTemplate([
+    {
+      label: 'Show Settings',
+      click: (): void => {
+        mainWindow?.show()
+        mainWindow?.focus()
+      }
+    },
+    { type: 'separator' },
+    {
+      label: isTouchpadEnabled ? 'Trackpad: Enabled' : 'Trackpad: Disabled',
+      type: 'checkbox',
+      checked: isTouchpadEnabled,
+      click: async (menuItem) => {
+        const newState = menuItem.checked
+        isTouchpadEnabled = newState
+        await applyTouchpadSetting(currentTouchpadDevice, newState)
+
+        const settingsPath = path.join(os.homedir(), '.config/nwg-react-displays/settings.json')
+        let settings: any = {}
+        if (fs.existsSync(settingsPath)) {
+          try {
+            settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'))
+          } catch (e) {}
+        }
+        settings.touchpad_enabled = newState
+        if (currentTouchpadDevice) settings.touchpad_device = currentTouchpadDevice
+        fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2))
+      }
+    },
+    { type: 'separator' },
+    {
+      label: 'Quit',
+      click: (): void => {
+        ; (app as any).isQuitting = true
+        app.quit()
+      }
+    }
+  ])
+  tray.setContextMenu(contextMenu)
+}
+
 function createTray(): void {
   const iconPath = is.dev
     ? iconAsset
     : path.join(os.homedir(), '.local/share/icons/hyprdisplay.png')
 
   console.log('Using tray icon from:', iconPath)
+
+  // Read initial touchpad state from settings
+  try {
+    const settingsPath = path.join(os.homedir(), '.config/nwg-react-displays/settings.json')
+    if (fs.existsSync(settingsPath)) {
+      const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'))
+      if (typeof settings.touchpad_enabled === 'boolean') {
+        isTouchpadEnabled = settings.touchpad_enabled
+      }
+      if (settings.touchpad_device) {
+        currentTouchpadDevice = settings.touchpad_device
+      }
+    }
+  } catch (e) {}
 
   // Delay 500ms agar System Tray (Waybar/Polybar) siap menerima ikon
   setTimeout(() => {
@@ -107,26 +174,8 @@ function createTray(): void {
     }
 
     tray = new Tray(image)
-
-    const contextMenu = Menu.buildFromTemplate([
-      {
-        label: 'Show Settings',
-        click: (): void => {
-          mainWindow?.show()
-          mainWindow?.focus()
-        }
-      },
-      { type: 'separator' },
-      {
-        label: 'Quit',
-        click: (): void => {
-          ; (app as any).isQuitting = true
-          app.quit()
-        }
-      }
-    ])
     tray.setToolTip('HyprDisplay Manager')
-    tray.setContextMenu(contextMenu)
+    updateTrayMenu()
 
     tray.on('click', () => {
       if (mainWindow?.isVisible()) {
@@ -211,6 +260,20 @@ async function syncAndApplyHyprlandConfig(isStartup = false) {
     }
   } catch (e) {
     console.error('Failed to restore cursor settings during sync:', e)
+  }
+
+  // Apply saved touchpad configuration if available
+  try {
+    const settingsPath = path.join(os.homedir(), '.config/nwg-react-displays/settings.json')
+    if (fs.existsSync(settingsPath)) {
+      const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'))
+      if (typeof settings.touchpad_enabled === 'boolean') {
+        console.log(`Restoring touchpad setting during sync: enabled=${settings.touchpad_enabled}`)
+        await applyTouchpadSetting(settings.touchpad_device, settings.touchpad_enabled)
+      }
+    }
+  } catch (e) {
+    console.error('Failed to restore touchpad setting during sync:', e)
   }
 
   if (isStartup) {
@@ -392,6 +455,129 @@ function updateLuaCustomFile(filePath: string, luaContent: string, isExecs = fal
   }
 
   fs.writeFileSync(filePath, newLines.join('\n'))
+}
+
+async function getDetectedTouchpads(): Promise<string[]> {
+  try {
+    const { stdout } = await execAsync('hyprctl devices -j')
+    const parsed = JSON.parse(stdout)
+    const mice = parsed.mice || []
+    const touchpads: string[] = []
+    for (const mouse of mice) {
+      const name = (mouse.name || '').toLowerCase()
+      if (name.includes('touchpad') || name.includes('trackpad') || name.includes('glidepoint')) {
+        touchpads.push(mouse.name)
+      }
+    }
+    return touchpads
+  } catch (err) {
+    console.error('Failed to get touchpad devices from hyprctl:', err)
+    return []
+  }
+}
+
+function updateCustomTouchpadConfig(deviceName: string, enabled: boolean): void {
+  const luaFilePath = path.join(os.homedir(), '.config/hypr/custom/general.lua')
+  const luaContent = `hl.device({\n    name = "${deviceName}",\n    enabled = ${enabled}\n})`
+
+  try {
+    updateLuaCustomFile(luaFilePath, luaContent, false)
+  } catch (err) {
+    console.error('Failed to update general.lua for touchpad:', err)
+  }
+
+  const confFilePath = path.join(os.homedir(), '.config/hypr/custom/general.conf')
+  if (fs.existsSync(confFilePath) || fs.existsSync(path.join(os.homedir(), '.config/hypr/hyprland.conf'))) {
+    const confContent = `device {\n    name = ${deviceName}\n    enabled = ${enabled}\n}`
+    try {
+      const startMarker = '# [nwg-react-displays] start'
+      const endMarker = '# [nwg-react-displays] end'
+      let current = fs.existsSync(confFilePath) ? fs.readFileSync(confFilePath, 'utf-8') : ''
+      const lines = current.split('\n')
+      const newLines: string[] = []
+      let inSection = false
+      let sectionUpdated = false
+      for (const line of lines) {
+        if (line.trim() === startMarker) {
+          inSection = true
+          newLines.push(line)
+          newLines.push(confContent)
+          sectionUpdated = true
+          continue
+        }
+        if (line.trim() === endMarker) {
+          inSection = false
+          newLines.push(line)
+          continue
+        }
+        if (!inSection) newLines.push(line)
+      }
+      if (!sectionUpdated) {
+        newLines.push('')
+        newLines.push(startMarker)
+        newLines.push(confContent)
+        newLines.push(endMarker)
+      }
+      fs.writeFileSync(confFilePath, newLines.join('\n'))
+    } catch (e) {
+      console.error('Failed to update general.conf for touchpad:', e)
+    }
+  }
+}
+
+async function applyTouchpadSetting(deviceName: string | null | undefined, enabled: boolean): Promise<boolean> {
+  let targetDevices: string[] = []
+  if (deviceName) {
+    targetDevices = [deviceName]
+  } else {
+    targetDevices = await getDetectedTouchpads()
+  }
+
+  if (targetDevices.length === 0) {
+    console.warn('No touchpad devices detected to apply setting')
+  }
+
+  let success = false
+  for (const dev of targetDevices) {
+    // 1. Dynamic runtime apply via Lua (hyprctl eval 'hl.device(...)')
+    try {
+      const evalCmd = `hyprctl eval 'hl.device({ name = "${dev}", enabled = ${enabled} })'`
+      await execAsync(evalCmd)
+      console.log(`Applied touchpad setting via hl.device: ${dev} enabled=${enabled}`)
+      success = true
+    } catch (luaErr) {
+      // 2. Fallback to legacy hyprctl keyword
+      try {
+        await execAsync(`hyprctl keyword "device[${dev}]:enabled" ${enabled}`)
+        console.log(`Applied touchpad setting via hyprctl keyword: ${dev} enabled=${enabled}`)
+        success = true
+      } catch (keywordErr) {
+        console.error(`Failed to apply touchpad setting for ${dev}:`, keywordErr)
+      }
+    }
+
+    // 3. Persist to custom hyprland config (general.lua / general.conf)
+    updateCustomTouchpadConfig(dev, enabled)
+  }
+
+  isTouchpadEnabled = enabled
+  if (targetDevices[0]) {
+    currentTouchpadDevice = targetDevices[0]
+  }
+
+  // Update System Tray menu
+  updateTrayMenu(enabled, currentTouchpadDevice)
+
+  // Notify any open renderer windows
+  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+    mainWindow.webContents.send('touchpad_status_changed', {
+      enabled,
+      devices: targetDevices,
+      currentDevice: currentTouchpadDevice
+    })
+  }
+
+  return success
 }
 
 ipcMain.handle('apply_hyprland_config', async (_, args: { config: string }) => {
@@ -637,6 +823,62 @@ ipcMain.handle('set_auto_apply', async (_, enabled: boolean) => {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
   fs.writeFileSync(filePath, JSON.stringify(settings, null, 2))
   return true
+})
+
+ipcMain.handle('get_touchpad_status', async () => {
+  const devices = await getDetectedTouchpads()
+  const settingsPath = path.join(os.homedir(), '.config/nwg-react-displays/settings.json')
+  let enabled = true
+  let savedDevice: string | null = null
+
+  if (fs.existsSync(settingsPath)) {
+    try {
+      const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'))
+      if (typeof settings.touchpad_enabled === 'boolean') {
+        enabled = settings.touchpad_enabled
+      }
+      if (settings.touchpad_device) {
+        savedDevice = settings.touchpad_device
+      }
+    } catch (e) {}
+  }
+
+  const currentDevice = savedDevice && devices.includes(savedDevice)
+    ? savedDevice
+    : (devices[0] || null)
+
+  isTouchpadEnabled = enabled
+  currentTouchpadDevice = currentDevice
+
+  return {
+    devices,
+    currentDevice,
+    enabled
+  }
+})
+
+ipcMain.handle('set_touchpad_enabled', async (_, { deviceName, enabled }: { deviceName?: string, enabled: boolean }) => {
+  const success = await applyTouchpadSetting(deviceName, enabled)
+
+  // Persist to settings.json
+  const settingsPath = path.join(os.homedir(), '.config/nwg-react-displays/settings.json')
+  let settings: any = {}
+  if (fs.existsSync(settingsPath)) {
+    try {
+      settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'))
+    } catch (e) {}
+  }
+  settings.touchpad_enabled = enabled
+  if (deviceName) {
+    settings.touchpad_device = deviceName
+  } else if (currentTouchpadDevice) {
+    settings.touchpad_device = currentTouchpadDevice
+  }
+  const dir = path.dirname(settingsPath)
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2))
+
+  return { success, enabled }
 })
 
 ipcMain.handle('get_startup_mode', async () => {
